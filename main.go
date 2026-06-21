@@ -1,3 +1,4 @@
+#--- IM A FAT FUCKIGN CHUBBY VIBECODDER---#
 package main
 
 import (
