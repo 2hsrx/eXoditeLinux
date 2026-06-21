@@ -397,7 +397,7 @@ func gatherConfig() Config {
 	cfg.GPU = menuSelect("Graphics Driver", []string{gpuNvidia, gpuOpenSrc, gpuNone})
 
 	cfg.Desktop = menuSelect("Desktop Environment", []string{
-		"KDE Plasma", "XFCE4", "GNOME", "None (TTY only)",
+		"KDE Plasma", "XFCE4", "GNOME", "Hyprland", "None (TTY only)",
 	})
 
 	fmt.Println(purple + "\n--- User Accounts ---" + reset)
@@ -816,6 +816,8 @@ func installBase(cfg Config) error {
 		packages = append(packages, "patterns-xfce")
 	case "GNOME":
 		packages = append(packages, "patterns-gnome")
+	case "Hyprland":
+		packages = append(packages, "hyprland", "sddm")
 	}
 
 	args := []string{"--root", "/mnt", "--gpg-auto-import-keys", "install", "-y"}
@@ -863,7 +865,7 @@ func writeFstab(cfg Config) error {
 			continue
 		}
 
-		if mount != "/mnt" && mount != "/mnt/boot/efi" && mount != "/mnt/home" {
+		if mount != "/mnt" && !strings.HasPrefix(mount, "/mnt/") {
 			continue
 		}
 
@@ -965,6 +967,8 @@ chmod 440 /etc/sudoers.d/10-wheel
 		script += "systemctl enable lightdm\n"
 	case "GNOME":
 		script += "systemctl enable gdm\n"
+	case "Hyprland":
+		script += "systemctl enable sddm\n"
 	}
 
 	scriptPath := "/mnt/setup.sh"
