@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -32,10 +33,9 @@ const (
 )
 
 const (
-	gpuNvidia    = "NVIDIA (proprietary)"
-	gpuNvidia580 = "NVIDIA 580xx (AUR, DKMS)"
-	gpuOpenSrc   = "Open Source (Intel / AMD / Nouveau)"
-	gpuNone      = "None (No extra drivers)"
+	gpuNvidia  = "NVIDIA (proprietary)"
+	gpuOpenSrc = "Open Source (Intel / AMD / Nouveau)"
+	gpuNone    = "None (No extra drivers)"
 )
 
 type Config struct {
@@ -43,7 +43,6 @@ type Config struct {
 	DiskSizeBytes uint64
 	PartLayout    string
 	RootSizeGB    int
-	Kernel        string
 	GPU           string
 	Desktop       string
 	Hostname      string
@@ -53,7 +52,6 @@ type Config struct {
 	Timezone      string
 	Keymap        string
 	Locale        string
-	InstallYay    string
 }
 
 func main() {
@@ -87,6 +85,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	cleanup()
 	fmt.Println(green + "\n[✓] Installation complete! Remove the USB and reboot." + reset)
 }
 
@@ -95,22 +94,11 @@ func runInstaller(cfg Config) error {
 		name string
 		fn   func(Config) error
 	}
-
 	steps := []step{
 		{"Partitioning disk", partitionDisk},
-		{"Installing base system", installBase},
+		{"Installing base system (openSUSE Tumbleweed)", installBase},
 		{"Configuring system", configure},
 	}
-
-	if cfg.Kernel == "linux-cachyos" {
-		steps = []step{
-			{"Partitioning disk", partitionDisk},
-			{"Setting up CachyOS repository", func(c Config) error { return setupCachyLive() }},
-			{"Installing base system", installBase},
-			{"Configuring system", configure},
-		}
-	}
-
 	for _, s := range steps {
 		fmt.Println(purple + "\n=== " + s.name + " ===" + reset)
 		if err := s.fn(cfg); err != nil {
@@ -122,17 +110,30 @@ func runInstaller(cfg Config) error {
 
 func cleanup() {
 	fmt.Println("\n[*] Unmounting filesystems...")
-	exec.Command("umount", "-R", "/mnt").Run()
+	exec.Command("umount", "/mnt/boot/efi").Run()
+	exec.Command("umount", "/mnt/home").Run()
+
+	exec.Command("umount", "/mnt/usr/local").Run()
+	exec.Command("umount", "/mnt/tmp").Run()
+	exec.Command("umount", "/mnt/root").Run()
+	exec.Command("umount", "/mnt/opt").Run()
+	exec.Command("umount", "/mnt/var").Run()
+	exec.Command("umount", "/mnt/.snapshots").Run()
+
+	exec.Command("umount", "/mnt/run").Run()
+	exec.Command("umount", "/mnt/sys").Run()
+	exec.Command("umount", "/mnt/proc").Run()
+	exec.Command("umount", "/mnt/dev").Run()
+	exec.Command("umount", "/mnt").Run()
 }
 
 func printWelcome() {
 	logo := purple +
-		" ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗\n" +
-		" ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝\n" +
-		" █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  \n" +
-		" ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  \n" +
-		" ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗\n" +
-		" ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝" + reset
+		" ███████ ██   ██  ██████  ██████  ██ ████████ ███████\n" +
+		" ██       ██ ██  ██    ██ ██   ██ ██    ██    ██     \n" +
+		" █████     ███   ██    ██ ██   ██ ██    ██    █████  \n" +
+		" ██       ██ ██  ██    ██ ██   ██ ██    ██    ██     \n" +
+		" ███████ ██   ██  ██████  ██████  ██    ██    ███████\n" + reset
 	fmt.Println(logo)
 	fmt.Println(white + "Welcome to the " + distroName + " Linux Installer!" + reset)
 	fmt.Println("This wizard will guide you through the installation.\n")
@@ -145,10 +146,8 @@ func confirmInstall(cfg Config) bool {
 	if cfg.PartLayout == "split" || cfg.PartLayout == "dualboot" {
 		fmt.Printf("  Root size:      %d GiB\n", cfg.RootSizeGB)
 	}
-	fmt.Printf("Kernel:           %s\n", cfg.Kernel)
 	fmt.Printf("GPU driver:       %s\n", cfg.GPU)
 	fmt.Printf("Desktop:          %s\n", cfg.Desktop)
-	fmt.Printf("Yay (AUR helper): %s\n", cfg.InstallYay)
 	fmt.Printf("Hostname:         %s\n", cfg.Hostname)
 	fmt.Printf("Username:         %s\n", cfg.Username)
 	fmt.Printf("Timezone:         %s\n", cfg.Timezone)
@@ -177,7 +176,6 @@ func menuSelect(title string, options []string) string {
 		fmt.Printf("  %d. %s\n", i+1, opt)
 	}
 	fmt.Println()
-
 	for {
 		answer := prompt(fmt.Sprintf("Select [1-%d]", len(options)), "", false)
 		n, err := strconv.Atoi(answer)
@@ -194,7 +192,6 @@ func prompt(msg, def string, mask bool) string {
 	} else {
 		fmt.Printf(yellow+"? "+reset+"%s: ", msg)
 	}
-
 	if mask {
 		fd := int(os.Stdin.Fd())
 		b, err := term.ReadPassword(fd)
@@ -202,9 +199,8 @@ func prompt(msg, def string, mask bool) string {
 		if err != nil || len(b) == 0 {
 			return def
 		}
-		return string(b)
+		return strings.TrimSpace(string(b))
 	}
-
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(line)
@@ -215,56 +211,30 @@ func prompt(msg, def string, mask bool) string {
 }
 
 func setupNetwork() {
-	exec.Command("systemctl", "start", "NetworkManager").Run()
-	if exec.Command("ping", "-c", "1", "-W", "3", "8.8.8.8").Run() != nil {
+	connected := false
+	if err := exec.Command("systemctl", "start", "NetworkManager").Run(); err == nil {
+		time.Sleep(2 * time.Second)
+		connected = checkNetwork()
+	}
+	if !connected {
+		if err := exec.Command("dhcpcd").Run(); err == nil {
+			time.Sleep(2 * time.Second)
+			connected = checkNetwork()
+		}
+	}
+	if !connected {
 		fmt.Println(red + "[!] Network not available." + reset)
 		if strings.ToLower(prompt("Open nmtui to connect? (Y/n)", "y", false)) == "y" {
 			exec.Command("nmtui").Run()
+			if !checkNetwork() {
+				fmt.Println(red + "[!] Still no network. Continuing anyway..." + reset)
+			}
 		}
 	}
 }
 
-func setupCachyLive() error {
-	fmt.Println("[*] Configuring CachyOS repository...")
-	keyReceived := false
-	if err := spinner("Adding CachyOS key (ubuntu keyserver)", func() error {
-		return exec.Command("pacman-key", "--recv-keys", "--keyserver", "hkps://keyserver.ubuntu.com", "F1656F40D7482129").Run()
-	}); err == nil {
-		keyReceived = true
-	}
-	if !keyReceived {
-		if err := spinner("Adding CachyOS key (mailfence keyserver)", func() error {
-			return exec.Command("pacman-key", "--recv-keys", "--keyserver", "hkps://keys.mailfence.com", "F1656F40D7482129").Run()
-		}); err != nil {
-			return fmt.Errorf("failed to receive CachyOS key from any keyserver: %w", err)
-		}
-	}
-
-	if err := spinner("Signing CachyOS key", func() error {
-		return exec.Command("pacman-key", "--lsign-key", "F1656F40D7482129").Run()
-	}); err != nil {
-		return err
-	}
-
-	conf, err := os.ReadFile("/etc/pacman.conf")
-	if err != nil {
-		return err
-	}
-	if !strings.Contains(string(conf), "[cachyos]") {
-		f, err := os.OpenFile("/etc/pacman.conf", os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		_, writeErr := f.WriteString("\n[cachyos]\nServer = https://mirror.cachyos.org/$repo/$arch\n")
-		f.Close()
-		if writeErr != nil {
-			return writeErr
-		}
-	}
-
-	return spinner("Syncing CachyOS keyring", func() error {
-		return exec.Command("pacman", "-Sy", "--noconfirm", "cachyos-keyring").Run()
-	})
+func checkNetwork() bool {
+	return exec.Command("ping", "-c", "1", "-W", "3", "8.8.8.8").Run() == nil
 }
 
 var keymaps = []string{
@@ -325,6 +295,9 @@ func gatherConfig() Config {
 			continue
 		}
 		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
 		name := fields[0]
 		if strings.HasPrefix(name, "loop") {
 			continue
@@ -388,6 +361,11 @@ func gatherConfig() Config {
 			sizeStr := prompt("Root partition size in GiB", defRoot, false)
 			s, err := strconv.Atoi(sizeStr)
 			if err == nil && s > 0 {
+				maxRoot := int(cfg.DiskSizeBytes/(1024*1024*1024)) - 1
+				if s > maxRoot {
+					fmt.Printf(red+"Root size too large. Max is %d GiB (disk minus 1 GiB EFI).\n"+reset, maxRoot)
+					continue
+				}
 				cfg.RootSizeGB = s
 				break
 			}
@@ -401,6 +379,12 @@ func gatherConfig() Config {
 			sizeStr := prompt("Root partition size in GiB", "30", false)
 			s, err := strconv.Atoi(sizeStr)
 			if err == nil && s > 0 {
+				freeBytes := checkFreeSpace(cfg.Disk)
+				freeGiB := freeBytes / (1024 * 1024 * 1024)
+				if uint64(s) > freeGiB {
+					fmt.Printf(red+"Not enough free space. Free: %d GiB.\n"+reset, freeGiB)
+					continue
+				}
 				cfg.RootSizeGB = s
 				break
 			}
@@ -410,31 +394,11 @@ func gatherConfig() Config {
 		cfg.PartLayout = "single"
 	}
 
-	cfg.Kernel = menuSelect("Kernel", []string{"linux", "linux-lts", "linux-zen", "linux-cachyos"})
-
-	cfg.GPU = menuSelect("Graphics Driver", []string{
-		gpuNvidia,
-		gpuNvidia580,
-		gpuOpenSrc,
-		gpuNone,
-	})
+	cfg.GPU = menuSelect("Graphics Driver", []string{gpuNvidia, gpuOpenSrc, gpuNone})
 
 	cfg.Desktop = menuSelect("Desktop Environment", []string{
-		"KDE Plasma",
-		"XFCE4",
-		"Hyprland",
-		"Sway",
-		"i3",
-		"Qtile",
-		"AwesomeWM",
-		"Cinnamon",
-		"LXDE",
-		"IceWM",
-		"Niri",
-		"None (TTY only)",
+		"KDE Plasma", "XFCE4", "GNOME", "None (TTY only)",
 	})
-
-	cfg.InstallYay = menuSelect("Install Yay (AUR helper)?", []string{"Yes", "No"})
 
 	fmt.Println(purple + "\n--- User Accounts ---" + reset)
 
@@ -489,31 +453,28 @@ func checkFreeSpace(disk string) uint64 {
 		return 0
 	}
 	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
 		if !strings.Contains(line, "free space") {
 			continue
 		}
 		fields := strings.Fields(line)
-		for i, f := range fields {
-			if f != "free" || i+3 >= len(fields) {
-				continue
-			}
-			if fields[i+1] != "space" {
-				continue
-			}
-			raw := strings.TrimPrefix(fields[i+3], "(")
-			switch {
-			case strings.HasSuffix(raw, "KiB"):
-				n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "KiB"), 10, 64)
-				return n * 1024
-			case strings.HasSuffix(raw, "MiB"):
-				n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "MiB"), 10, 64)
-				return n * 1024 * 1024
-			case strings.HasSuffix(raw, "GiB"):
-				n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "GiB"), 10, 64)
-				return n * 1024 * 1024 * 1024
-			case strings.HasSuffix(raw, "TiB"):
-				n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "TiB"), 10, 64)
-				return n * 1024 * 1024 * 1024 * 1024
+		for i := 0; i < len(fields)-3; i++ {
+			if fields[i] == "free" && fields[i+1] == "space" {
+				raw := strings.TrimPrefix(fields[i+3], "(")
+				switch {
+				case strings.HasSuffix(raw, "KiB"):
+					n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "KiB"), 10, 64)
+					return n * 1024
+				case strings.HasSuffix(raw, "MiB"):
+					n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "MiB"), 10, 64)
+					return n * 1024 * 1024
+				case strings.HasSuffix(raw, "GiB"):
+					n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "GiB"), 10, 64)
+					return n * 1024 * 1024 * 1024
+				case strings.HasSuffix(raw, "TiB"):
+					n, _ := strconv.ParseUint(strings.TrimSuffix(raw, "TiB"), 10, 64)
+					return n * 1024 * 1024 * 1024 * 1024
+				}
 			}
 		}
 	}
@@ -537,25 +498,37 @@ func listPartitions(disk string) []string {
 	return parts
 }
 
-func partitionDevice(disk string) string {
-	if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-		return disk + "p"
+func findNewPartitions(disk string, before []string) []string {
+	after := listPartitions(disk)
+	var newParts []string
+	for _, ap := range after {
+		exists := false
+		for _, bp := range before {
+			if ap == bp {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			newParts = append(newParts, ap)
+		}
 	}
-	return disk
+	return newParts
 }
 
 func partitionDisk(cfg Config) error {
 	if cfg.PartLayout == "dualboot" {
 		return partitionDiskDualboot(cfg)
 	}
-
 	disk := cfg.Disk
+	before := listPartitions(disk)
 
 	if err := spinner("Wiping partition table", func() error {
 		return exec.Command("sgdisk", "-Z", disk).Run()
 	}); err != nil {
 		return err
 	}
+	exec.Command("udevadm", "settle", "--timeout=10").Run()
 
 	if cfg.PartLayout == "split" {
 		if err := spinner("Creating EFI partition (1 GiB)", func() error {
@@ -585,29 +558,76 @@ func partitionDisk(cfg Config) error {
 			return err
 		}
 	}
-
 	exec.Command("udevadm", "settle", "--timeout=10").Run()
 
-	p := partitionDevice(disk)
-	efi := p + "1"
-	root := p + "2"
+	newParts := findNewPartitions(disk, before)
+	if len(newParts) < 2 {
+		return fmt.Errorf("could not detect all new partitions")
+	}
+	var efi, root, home string
+	for _, p := range newParts {
+		typ, _ := exec.Command("lsblk", "-nlo", "PARTTYPE", p).Output()
+		t := strings.TrimSpace(string(typ))
+		switch {
+		case strings.EqualFold(t, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") || t == "EFI System":
+			efi = p
+		case strings.HasPrefix(t, "0fc63daf-8483-4772-8e79-3d69d8477de4") || t == "Linux filesystem":
+			if root == "" {
+				root = p
+			} else {
+				home = p
+			}
+		}
+	}
+	if efi == "" || root == "" {
+		return fmt.Errorf("unable to identify EFI/root partitions")
+	}
 
 	if err := spinner("Formatting EFI (FAT32)", func() error {
 		return exec.Command("mkfs.fat", "-F32", efi).Run()
 	}); err != nil {
 		return err
 	}
-	if err := spinner("Formatting root (ext4)", func() error {
-		return exec.Command("mkfs.ext4", "-F", root).Run()
+
+	if err := spinner("Formatting root (Btrfs)", func() error {
+		return exec.Command("mkfs.btrfs", "-f", root).Run()
 	}); err != nil {
 		return err
 	}
 
-	if err := spinner("Mounting root", func() error {
-		return exec.Command("mount", root, "/mnt").Run()
+	tmpMount := "/mnt/btrfs_tmp"
+	os.MkdirAll(tmpMount, 0755)
+	if err := exec.Command("mount", root, tmpMount).Run(); err != nil {
+		return err
+	}
+
+	subvols := []string{"@", "@/.snapshots", "@/home", "@/var", "@/opt", "@/root", "@/tmp", "@/usr/local"}
+	for _, sv := range subvols {
+		full := filepath.Join(tmpMount, sv)
+		if err := exec.Command("btrfs", "subvolume", "create", full).Run(); err != nil {
+			exec.Command("umount", tmpMount).Run()
+			return err
+		}
+	}
+	exec.Command("chattr", "+C", filepath.Join(tmpMount, "@/var")).Run()
+	exec.Command("umount", tmpMount).Run()
+
+	if err := spinner("Mounting root subvolume", func() error {
+		return exec.Command("mount", "-o", "subvol=@", root, "/mnt").Run()
 	}); err != nil {
 		return err
 	}
+
+	subvolsToMount := []string{".snapshots", "var", "opt", "root", "tmp", "usr/local"}
+	if cfg.PartLayout != "split" {
+		subvolsToMount = append(subvolsToMount, "home")
+	}
+	for _, sv := range subvolsToMount {
+		targetDir := filepath.Join("/mnt", sv)
+		os.MkdirAll(targetDir, 0755)
+		exec.Command("mount", "-o", "subvol=@/"+sv, root, targetDir).Run()
+	}
+
 	os.MkdirAll("/mnt/boot/efi", 0755)
 	if err := spinner("Mounting EFI", func() error {
 		return exec.Command("mount", efi, "/mnt/boot/efi").Run()
@@ -615,8 +635,7 @@ func partitionDisk(cfg Config) error {
 		return err
 	}
 
-	if cfg.PartLayout == "split" {
-		home := p + "3"
+	if cfg.PartLayout == "split" && home != "" {
 		if err := spinner("Formatting home (ext4)", func() error {
 			return exec.Command("mkfs.ext4", "-F", home).Run()
 		}); err != nil {
@@ -629,36 +648,29 @@ func partitionDisk(cfg Config) error {
 			return err
 		}
 	}
-
 	return nil
 }
 
 func partitionDiskDualboot(cfg Config) error {
 	disk := cfg.Disk
-
 	fmt.Println(cyan + "[*] Setting up dualboot — existing data will NOT be wiped" + reset)
-
 	partsBefore := listPartitions(disk)
 
 	var efiDevice string
 	out, _ := exec.Command("lsblk", "-nlo", "NAME,PARTTYPE", disk).Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[1] == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
+		if len(fields) >= 2 && strings.EqualFold(fields[1], "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") {
 			efiDevice = "/dev/" + fields[0]
 			break
 		}
 	}
-
 	hasEFI := efiDevice != ""
-
-	if hasEFI {
-		fmt.Printf("[*] Reusing existing EFI partition: %s (will NOT format)\n", efiDevice)
-	} else {
+	if !hasEFI {
 		fmt.Println("[*] No EFI partition found. Creating one in free space...")
 		const efiNeedBytes = uint64(512) * 1024 * 1024
 		freeBytes := checkFreeSpace(disk)
-		if freeBytes > 0 && freeBytes < efiNeedBytes {
+		if freeBytes < efiNeedBytes {
 			return fmt.Errorf("not enough free space for EFI partition: need 512 MiB but only %d MiB available", freeBytes/1024/1024)
 		}
 		if err := spinner("Creating EFI partition (512 MiB)", func() error {
@@ -672,35 +684,22 @@ func partitionDiskDualboot(cfg Config) error {
 		}
 		exec.Command("partprobe", disk).Run()
 		exec.Command("udevadm", "settle", "--timeout=10").Run()
-
-		partsAfter := listPartitions(disk)
-		for _, p := range partsAfter {
-			found := false
-			for _, b := range partsBefore {
-				if p == b {
-					found = true
-					break
-				}
-			}
-			if !found {
-				efiDevice = p
-				break
-			}
+		newEFIs := findNewPartitions(disk, partsBefore)
+		if len(newEFIs) != 1 {
+			return fmt.Errorf("could not identify new EFI partition")
 		}
-		partsBefore = partsAfter
+		efiDevice = newEFIs[0]
+		partsBefore = listPartitions(disk)
 	}
-
 	if efiDevice == "" {
 		return fmt.Errorf("could not determine EFI partition")
 	}
 
 	needBytes := uint64(cfg.RootSizeGB) * 1024 * 1024 * 1024
 	freeBytes := checkFreeSpace(disk)
-	if freeBytes > 0 && freeBytes < needBytes {
-		return fmt.Errorf("not enough free space: need %d GiB but only %d GiB available on %s",
-			cfg.RootSizeGB, freeBytes/1024/1024/1024, disk)
+	if freeBytes < needBytes {
+		return fmt.Errorf("not enough free space: need %d GiB but only %d GiB available", cfg.RootSizeGB, freeBytes/1024/1024/1024)
 	}
-
 	if err := spinner(fmt.Sprintf("Creating root partition (%d GiB) in free space", cfg.RootSizeGB), func() error {
 		out, err := exec.Command("sgdisk", "-n", "0:0:+"+strconv.Itoa(cfg.RootSizeGB)+"G", "-t", "0:8300", disk).CombinedOutput()
 		if err != nil {
@@ -712,32 +711,17 @@ func partitionDiskDualboot(cfg Config) error {
 	}
 	exec.Command("partprobe", disk).Run()
 	exec.Command("udevadm", "settle", "--timeout=10").Run()
-
-	var rootDevice string
-	partsAfter := listPartitions(disk)
-	for _, p := range partsAfter {
-		found := false
-		for _, b := range partsBefore {
-			if p == b {
-				found = true
-				break
-			}
-		}
-		if !found {
-			rootDevice = p
-		}
+	newRoots := findNewPartitions(disk, partsBefore)
+	if len(newRoots) != 1 {
+		return fmt.Errorf("could not identify new root partition")
 	}
+	rootDevice := newRoots[0]
 
-	if rootDevice == "" {
-		return fmt.Errorf("could not determine root partition")
-	}
-
-	if err := spinner("Formatting root (ext4)", func() error {
-		return exec.Command("mkfs.ext4", "-F", rootDevice).Run()
+	if err := spinner("Formatting root (Btrfs)", func() error {
+		return exec.Command("mkfs.btrfs", "-f", rootDevice).Run()
 	}); err != nil {
 		return err
 	}
-
 	if !hasEFI {
 		if err := spinner("Formatting EFI (FAT32)", func() error {
 			return exec.Command("mkfs.fat", "-F32", efiDevice).Run()
@@ -746,11 +730,38 @@ func partitionDiskDualboot(cfg Config) error {
 		}
 	}
 
-	if err := spinner("Mounting root", func() error {
-		return exec.Command("mount", rootDevice, "/mnt").Run()
+	tmpMount := "/mnt/btrfs_tmp"
+	os.MkdirAll(tmpMount, 0755)
+	if err := exec.Command("mount", rootDevice, tmpMount).Run(); err != nil {
+		return err
+	}
+	subvols := []string{"@", "@/.snapshots", "@/home", "@/var", "@/opt", "@/root", "@/tmp", "@/usr/local"}
+	for _, sv := range subvols {
+		full := filepath.Join(tmpMount, sv)
+		if err := exec.Command("btrfs", "subvolume", "create", full).Run(); err != nil {
+			exec.Command("umount", tmpMount).Run()
+			return err
+		}
+	}
+	exec.Command("chattr", "+C", filepath.Join(tmpMount, "@/var")).Run()
+	exec.Command("umount", tmpMount).Run()
+
+	if err := spinner("Mounting root subvolume", func() error {
+		return exec.Command("mount", "-o", "subvol=@", rootDevice, "/mnt").Run()
 	}); err != nil {
 		return err
 	}
+
+	subvolsToMount := []string{".snapshots", "var", "opt", "root", "tmp", "usr/local"}
+	if cfg.PartLayout != "split" {
+		subvolsToMount = append(subvolsToMount, "home")
+	}
+	for _, sv := range subvolsToMount {
+		targetDir := filepath.Join("/mnt", sv)
+		os.MkdirAll(targetDir, 0755)
+		exec.Command("mount", "-o", "subvol=@/"+sv, rootDevice, targetDir).Run()
+	}
+
 	os.MkdirAll("/mnt/boot/efi", 0755)
 	if err := spinner("Mounting EFI", func() error {
 		return exec.Command("mount", efiDevice, "/mnt/boot/efi").Run()
@@ -763,214 +774,198 @@ func partitionDiskDualboot(cfg Config) error {
 }
 
 func installBase(cfg Config) error {
-	pkgs := []string{
-		"base", "base-devel", "linux-firmware",
-		"networkmanager", "grub", "efibootmgr",
-		"nano", "vim", "git", "fastfetch",
+	repoOSS := "http://download.opensuse.org/tumbleweed/repo/oss/"
+	repoNonOSS := "http://download.opensuse.org/tumbleweed/repo/non-oss/"
+
+	if err := spinner("Adding OSS repository", func() error {
+		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoOSS, "repo-oss").Run()
+	}); err != nil {
+		return err
+	}
+	if err := spinner("Adding Non-OSS repository", func() error {
+		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoNonOSS, "repo-non-oss").Run()
+	}); err != nil {
+		return err
+	}
+	if err := spinner("Refreshing repositories", func() error {
+		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "refresh").Run()
+	}); err != nil {
+		return err
 	}
 
-	if cfg.Kernel != "linux-cachyos" {
-		pkgs = append(pkgs, cfg.Kernel, cfg.Kernel+"-headers")
+	packages := []string{
+		"patterns-base-minimal_base",
+		"patterns-base-enhanced_base",
+		"kernel-default",
+		"grub2-efi",
+		"grub2",
+		"NetworkManager",
+		"sudo",
 	}
 
-	switch cfg.GPU {
-	case gpuNvidia:
-		if cfg.Kernel == "linux" || cfg.Kernel == "linux-lts" {
-			pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
-		} else {
-			pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
-		}
-	case gpuOpenSrc:
-		pkgs = append(pkgs, "mesa", "vulkan-radeon", "vulkan-intel", "libva-mesa-driver")
+	if cfg.GPU == gpuNvidia {
+		packages = append(packages, "kernel-default-devel", "nvidia-driver-G06-kmp-default", "nvidia-gl-G06")
+	} else if cfg.GPU == gpuOpenSrc {
+		packages = append(packages, "kernel-firmware")
 	}
 
 	switch cfg.Desktop {
 	case "KDE Plasma":
-		pkgs = append(pkgs, "plasma", "sddm", "konsole", "dolphin", "ark")
+		packages = append(packages, "patterns-kde-plasma")
 	case "XFCE4":
-		pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
-	case "Hyprland":
-		pkgs = append(pkgs, "hyprland", "kitty", "waybar", "wofi", "xdg-desktop-portal-hyprland", "sddm")
-	case "Sway":
-		pkgs = append(pkgs, "sway", "swaylock", "swayidle", "waybar", "wofi", "foot", "xdg-desktop-portal-wlr", "sddm")
-	case "i3":
-		pkgs = append(pkgs, "i3-wm", "i3status", "i3lock", "dmenu", "xorg-server", "xorg-xinit", "alacritty", "lightdm", "lightdm-gtk-greeter")
-	case "Qtile":
-		pkgs = append(pkgs, "qtile", "alacritty", "xorg-server", "xorg-xinit", "lightdm", "lightdm-gtk-greeter")
-	case "AwesomeWM":
-		pkgs = append(pkgs, "awesome", "alacritty", "xorg-server", "xorg-xinit", "lightdm", "lightdm-gtk-greeter")
-	case "Cinnamon":
-		pkgs = append(pkgs, "cinnamon", "gnome-terminal", "xorg-server", "lightdm", "lightdm-gtk-greeter")
-	case "LXDE":
-		pkgs = append(pkgs, "lxde", "lxdm", "xorg-server")
-	case "IceWM":
-		pkgs = append(pkgs, "icewm", "icewm-themes", "xorg-server", "xorg-xinit", "lightdm", "lightdm-gtk-greeter")
-	case "Niri":
-		pkgs = append(pkgs, "niri", "foot", "waybar", "wofi", "sddm")
+		packages = append(packages, "patterns-xfce")
+	case "GNOME":
+		packages = append(packages, "patterns-gnome")
 	}
 
-	fmt.Println(cyan + "[*] Running pacstrap – this may take several minutes..." + reset)
-	cmd := exec.Command("pacstrap", append([]string{"/mnt"}, pkgs...)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	args := []string{"--root", "/mnt", "--gpg-auto-import-keys", "install", "-y"}
+	args = append(args, packages...)
+
+	if err := spinner("Installing system packages", func() error {
+		cmd := exec.Command("zypper", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func configure(cfg Config) error {
-	fstab, err := exec.Command("genfstab", "-U", "/mnt").Output()
+func writeFstab(cfg Config) error {
+	var lines []string
+
+	out, err := exec.Command("lsblk", "-P", "-o", "NAME,MOUNTPOINT,FSTYPE,UUID").Output()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile("/mnt/etc/fstab", fstab, 0644); err != nil {
+
+	re := regexp.MustCompile(`([A-Z]+)="([^"]*)"`)
+
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		matches := re.FindAllStringSubmatch(line, -1)
+		fields := make(map[string]string)
+		for _, m := range matches {
+			fields[m[1]] = m[2]
+		}
+
+		mount := fields["MOUNTPOINT"]
+		fstype := fields["FSTYPE"]
+		uuid := fields["UUID"]
+
+		if uuid == "" {
+			continue
+		}
+
+		if mount != "/mnt" && mount != "/mnt/boot/efi" && mount != "/mnt/home" {
+			continue
+		}
+
+		targetMount := strings.TrimPrefix(mount, "/mnt")
+		if targetMount == "" {
+			targetMount = "/"
+		}
+
+		if fstype == "btrfs" && targetMount != "/" {
+			continue
+		}
+
+		if fstype == "btrfs" && targetMount == "/" {
+			lines = append(lines, fmt.Sprintf("UUID=%s / btrfs defaults,subvol=@ 0 0", uuid))
+
+			subvols := map[string]string{
+				"/.snapshots": "@/.snapshots",
+				"/var":         "@/var",
+				"/opt":         "@/opt",
+				"/root":        "@/root",
+				"/tmp":         "@/tmp",
+				"/usr/local":   "@/usr/local",
+			}
+
+			if cfg.PartLayout != "split" {
+				subvols["/home"] = "@/home"
+			}
+
+			for targetPath, subvolName := range subvols {
+				lines = append(lines, fmt.Sprintf("UUID=%s %s btrfs defaults,subvol=%s 0 0", uuid, targetPath, subvolName))
+			}
+		} else {
+			lines = append(lines, fmt.Sprintf("UUID=%s %s %s defaults 0 2", uuid, targetMount, fstype))
+		}
+	}
+
+	if len(lines) == 0 {
+		return fmt.Errorf("no mount points found for fstab")
+	}
+
+	return os.WriteFile("/mnt/etc/fstab", []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+func configure(cfg Config) error {
+	os.MkdirAll("/mnt/proc", 0755)
+	os.MkdirAll("/mnt/sys", 0755)
+	os.MkdirAll("/mnt/dev", 0755)
+	os.MkdirAll("/mnt/run", 0755)
+
+	mountCmd := func(source, target, fstype string, flags uintptr, data string) error {
+		return syscall.Mount(source, target, fstype, flags, data)
+	}
+	if err := mountCmd("proc", "/mnt/proc", "proc", 0, ""); err != nil {
+		return err
+	}
+	if err := mountCmd("/sys", "/mnt/sys", "", syscall.MS_BIND, ""); err != nil {
+		return err
+	}
+	if err := mountCmd("/dev", "/mnt/dev", "", syscall.MS_BIND, ""); err != nil {
+		return err
+	}
+	if err := mountCmd("tmpfs", "/mnt/run", "tmpfs", 0, "mode=0755"); err != nil {
+		return err
+	}
+	defer func() {
+		syscall.Unmount("/mnt/run", 0)
+		syscall.Unmount("/mnt/dev", 0)
+		syscall.Unmount("/mnt/sys", 0)
+		syscall.Unmount("/mnt/proc", 0)
+	}()
+
+	exec.Command("cp", "/etc/resolv.conf", "/mnt/etc/").Run()
+
+	if err := writeFstab(cfg); err != nil {
 		return err
 	}
 
-	logoANSI := purple +
-		" ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗\n" +
-		" ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝\n" +
-		" █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  \n" +
-		" ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  \n" +
-		" ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗\n" +
-		" ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝" + reset
-
-	confJSON := `{"logo":{"source":"/etc/fastfetch/logo.txt"},"modules":["title","os","kernel","uptime","shell","de","cpu","memory"]}`
-	os.MkdirAll("/mnt/etc/fastfetch", 0755)
-	os.WriteFile("/mnt/etc/fastfetch/logo.txt", []byte(logoANSI), 0644)
-	os.WriteFile("/mnt/etc/fastfetch/config.jsonc", []byte(confJSON), 0644)
-
-	osRel := fmt.Sprintf("NAME=\"%s Linux\"\nID=%s\nID_LIKE=arch\nPRETTY_NAME=\"%s Linux\"\n",
-		distroName, distroID, distroName)
-
 	script := "#!/bin/bash\nset -e\n"
-	script += "trap 'rm -f /passwd.tmp' EXIT\n"
-	script += fmt.Sprintf("GPU_DRIVER=%q\n", cfg.GPU)
-	script += fmt.Sprintf("INSTALL_YAY=%q\n", cfg.InstallYay)
-
-	script += fmt.Sprintf("ln -sf /usr/share/zoneinfo/%s /etc/localtime\n", cfg.Timezone)
-	script += "hwclock --systohc\n"
-	script += fmt.Sprintf("echo '%s UTF-8' >> /etc/locale.gen\n", cfg.Locale)
-	script += "locale-gen\n"
-	script += fmt.Sprintf("echo 'LANG=%s' > /etc/locale.conf\n", cfg.Locale)
-	script += fmt.Sprintf("echo 'LC_ALL=%s' >> /etc/locale.conf\n", cfg.Locale)
 	script += fmt.Sprintf("echo '%s' > /etc/hostname\n", cfg.Hostname)
+	script += fmt.Sprintf("ln -sf /usr/share/zoneinfo/%s /etc/localtime\n", cfg.Timezone)
+	script += fmt.Sprintf("echo '%s' > /etc/timezone\n", cfg.Timezone)
+	script += fmt.Sprintf("echo 'LANG=%s' > /etc/locale.conf\n", cfg.Locale)
 	script += fmt.Sprintf("echo 'KEYMAP=%s' > /etc/vconsole.conf\n", cfg.Keymap)
-	script += fmt.Sprintf("printf '127.0.0.1 localhost\\n::1 localhost\\n127.0.1.1 %s.localdomain %s\\n' > /etc/hosts\n",
-		cfg.Hostname, cfg.Hostname)
-
-	script += fmt.Sprintf("printf '%%s' %q > /etc/os-release\n", osRel)
-	script += fmt.Sprintf("sed -i 's/GRUB_DISTRIBUTOR=\"Arch\"/GRUB_DISTRIBUTOR=\"%s\"/' /etc/default/grub\n", distroName)
-
-	if cfg.GPU == gpuNvidia || cfg.GPU == gpuNvidia580 {
-		script += "sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*/& nvidia-drm.modeset=1/' /etc/default/grub\n"
-		script += "sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf\n"
-	}
-
-	if cfg.Kernel == "linux-cachyos" {
-		script += `
-if ! grep -q '\[cachyos\]' /etc/pacman.conf; then
-    printf '\n[cachyos]\nServer = https://mirror.cachyos.org/$repo/$arch\n' >> /etc/pacman.conf
-fi
-pacman-key --recv-keys --keyserver hkps://keyserver.ubuntu.com F1656F40D7482129 || \
-    pacman-key --recv-keys --keyserver hkps://keys.mailfence.com F1656F40D7482129
-pacman-key --lsign-key F1656F40D7482129
-pacman -Sy --noconfirm cachyos-keyring cachyos-mirrorlist
-pacman -S --noconfirm linux-cachyos linux-cachyos-headers
+	script += fmt.Sprintf("cat > /etc/os-release << 'EOF'\nNAME=\"%s Linux\"\nID=%s\nPRETTY_NAME=\"%s Linux\"\nEOF\n", distroName, distroID, distroName)
+	script += fmt.Sprintf("useradd -m -G wheel,users -s /bin/bash '%s'\n", cfg.Username)
+	script += fmt.Sprintf("echo 'root:%s' | chpasswd\n", cfg.RootPass)
+	script += fmt.Sprintf("echo '%s:%s' | chpasswd\n", cfg.Username, cfg.Password)
+	script += `echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
+chmod 440 /etc/sudoers.d/10-wheel
 `
-	}
-
-	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
-
-	script += fmt.Sprintf("printf '%%s\\n%%s\\n' %q %q | passwd root\n", cfg.RootPass, cfg.RootPass)
-	script += fmt.Sprintf("printf '%%s\\n%%s\\n' %q %q | passwd '%s'\n", cfg.Password, cfg.Password, cfg.Username)
-
-	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
-	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
-
-	script += `
-YAY_DONE=0
-if [ "$GPU_DRIVER" = "NVIDIA 580xx (AUR, DKMS)" ]; then
-    useradd -m -s /bin/bash tempbuilder || true
-    usermod -aG wheel tempbuilder
-    echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-build
-    chmod 440 /etc/sudoers.d/99-yay-build
-    su - tempbuilder -c '
-        export HOME=/home/tempbuilder
-        cd "$HOME"
-        git clone https://aur.archlinux.org/yay-bin.git
-        cd yay-bin
-        makepkg -si --noconfirm
-        cd ..
-        rm -rf yay-bin
-    '
-    rm -f /etc/sudoers.d/99-yay-build
-    userdel -r tempbuilder 2>/dev/null || true
-    yay -S --noconfirm nvidia-580xx-dkms nvidia-580xx-utils nvidia-580xx-settings
-    YAY_DONE=1
-fi
-`
-
-	script += `
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -P
-`
-
-	script += `
-ROOT_UUID=$(findmnt -n -o UUID /)
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"root=UUID=$ROOT_UUID |" /etc/default/grub
-if [ -d /sys/firmware/efi ]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=` + distroName + `
-else
-    DISK=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) | head -1)
-    grub-install --target=i386-pc /dev/$DISK
-fi
-grub-mkconfig -o /boot/grub/grub.cfg
-`
-
+	script += "mkinitrd\n"
+	script += `grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=` + distroName + "\n"
+	script += `grub2-mkconfig -o /boot/grub2/grub.cfg` + "\n"
 	script += "systemctl enable NetworkManager\n"
-
 	switch cfg.Desktop {
-	case "KDE Plasma", "Hyprland", "Sway", "Qtile", "Niri":
+	case "KDE Plasma":
 		script += "systemctl enable sddm\n"
-	case "XFCE4", "i3", "AwesomeWM", "Cinnamon", "IceWM":
+	case "XFCE4":
 		script += "systemctl enable lightdm\n"
-	case "LXDE":
-		script += "systemctl enable lxdm\n"
+	case "GNOME":
+		script += "systemctl enable gdm\n"
 	}
-
-	if cfg.Desktop == "Niri" {
-		script += "mkdir -p /etc/sddm.conf.d\n"
-		script += "printf '[General]\\nDisplayServer=wayland\\nGreeterEnvironment=QT_WAYLAND_SHELL_INTEGRATION=layer-shell\\n' > /etc/sddm.conf.d/wayland.conf\n"
-	}
-
-	script += `
-dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
-chmod 600 /swapfile
-mkswap /swapfile
-swapon /swapfile
-echo '/swapfile none swap defaults 0 0' >> /etc/fstab
-`
-
-	script += fmt.Sprintf("echo 'fastfetch' >> /home/%s/.bashrc\n", cfg.Username)
-	script += "echo 'fastfetch' >> /root/.bashrc\n"
-
-	script += `
-if [ "$INSTALL_YAY" = "Yes" ] && [ "$YAY_DONE" -eq 0 ]; then
-    useradd -m -s /bin/bash tempbuilder || true
-    usermod -aG wheel tempbuilder
-    echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-build
-    chmod 440 /etc/sudoers.d/99-yay-build
-    su - tempbuilder -c '
-        export HOME=/home/tempbuilder
-        cd "$HOME"
-        git clone https://aur.archlinux.org/yay-bin.git
-        cd yay-bin
-        makepkg -si --noconfirm
-        cd ..
-        rm -rf yay-bin
-    '
-    rm -f /etc/sudoers.d/99-yay-build
-    userdel -r tempbuilder 2>/dev/null || true
-fi
-`
 
 	scriptPath := "/mnt/setup.sh"
 	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
@@ -979,7 +974,11 @@ fi
 	defer os.Remove(scriptPath)
 
 	fmt.Println(cyan + "[*] Running chroot configuration..." + reset)
-	cmd := exec.Command("arch-chroot", "/mnt", "/bin/bash", "/setup.sh")
+	cmd := exec.Command("chroot", "/mnt", "/bin/bash", "/setup.sh")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	return nil
 }
