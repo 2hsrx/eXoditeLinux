@@ -524,7 +524,11 @@ func partitionDisk(cfg Config) error {
 	before := listPartitions(disk)
 
 	if err := spinner("Wiping partition table", func() error {
-		return exec.Command("sgdisk", "-Z", disk).Run()
+		out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -532,28 +536,48 @@ func partitionDisk(cfg Config) error {
 
 	if cfg.PartLayout == "split" {
 		if err := spinner("Creating EFI partition (1 GiB)", func() error {
-			return exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", disk).Run()
+			out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", disk).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
 		if err := spinner(fmt.Sprintf("Creating root partition (%d GiB)", cfg.RootSizeGB), func() error {
-			return exec.Command("sgdisk", "-n", "2:0:+"+strconv.Itoa(cfg.RootSizeGB)+"G", "-t", "2:8300", disk).Run()
+			out, err := exec.Command("sgdisk", "-n", "2:0:+"+strconv.Itoa(cfg.RootSizeGB)+"G", "-t", "2:8300", disk).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
 		if err := spinner("Creating home partition (rest of disk)", func() error {
-			return exec.Command("sgdisk", "-n", "3:0:0", "-t", "3:8300", disk).Run()
+			out, err := exec.Command("sgdisk", "-n", "3:0:0", "-t", "3:8300", disk).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
 	} else {
 		if err := spinner("Creating EFI partition (1 GiB)", func() error {
-			return exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", disk).Run()
+			out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", disk).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
 		if err := spinner("Creating root partition (rest of disk)", func() error {
-			return exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", disk).Run()
+			out, err := exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", disk).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("sgdisk: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
@@ -562,16 +586,33 @@ func partitionDisk(cfg Config) error {
 
 	newParts := findNewPartitions(disk, before)
 	if len(newParts) < 2 {
-		return fmt.Errorf("could not detect all new partitions")
+		return fmt.Errorf("could not detect all new partitions, found: %v", newParts)
 	}
+
 	var efi, root, home string
 	for _, p := range newParts {
 		typ, _ := exec.Command("lsblk", "-nlo", "PARTTYPE", p).Output()
 		t := strings.TrimSpace(string(typ))
+		if t == "" {
+			typ, _ = exec.Command("blkid", "-s", "PARTUUID", "-o", "value", p).Output()
+			t = strings.TrimSpace(string(typ))
+		}
+
+		isEFI := strings.EqualFold(t, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") || t == "EFI System"
+		isLinux := strings.HasPrefix(t, "0fc63daf-8483-4772-8e79-3d69d8477de4") || t == "Linux filesystem"
+
+		if !isEFI && !isLinux {
+			sizeOut, _ := exec.Command("lsblk", "-nlo", "SIZE", p).Output()
+			size := strings.TrimSpace(string(sizeOut))
+			if strings.HasSuffix(size, "G") || strings.HasSuffix(size, "T") {
+				isLinux = true
+			}
+		}
+
 		switch {
-		case strings.EqualFold(t, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") || t == "EFI System":
+		case isEFI:
 			efi = p
-		case strings.HasPrefix(t, "0fc63daf-8483-4772-8e79-3d69d8477de4") || t == "Linux filesystem":
+		case isLinux:
 			if root == "" {
 				root = p
 			} else {
@@ -579,18 +620,46 @@ func partitionDisk(cfg Config) error {
 			}
 		}
 	}
+
 	if efi == "" || root == "" {
-		return fmt.Errorf("unable to identify EFI/root partitions")
+		if efi == "" {
+			for _, p := range newParts {
+				if p != root && p != home {
+					efi = p
+					break
+				}
+			}
+		}
+		if root == "" {
+			for _, p := range newParts {
+				if p != efi && p != home {
+					root = p
+					break
+				}
+			}
+		}
+	}
+
+	if efi == "" || root == "" {
+		return fmt.Errorf("unable to identify EFI/root partitions. EFI=%s Root=%s Parts=%v", efi, root, newParts)
 	}
 
 	if err := spinner("Formatting EFI (FAT32)", func() error {
-		return exec.Command("mkfs.fat", "-F32", efi).Run()
+		out, err := exec.Command("mkfs.fat", "-F32", efi).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mkfs.fat: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	if err := spinner("Formatting root (Btrfs)", func() error {
-		return exec.Command("mkfs.btrfs", "-f", root).Run()
+		out, err := exec.Command("mkfs.btrfs", "-f", root).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mkfs.btrfs: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -598,22 +667,27 @@ func partitionDisk(cfg Config) error {
 	tmpMount := "/mnt/btrfs_tmp"
 	os.MkdirAll(tmpMount, 0755)
 	if err := exec.Command("mount", root, tmpMount).Run(); err != nil {
-		return err
+		return fmt.Errorf("mount btrfs tmp: %w", err)
 	}
 
 	subvols := []string{"@", "@/.snapshots", "@/home", "@/var", "@/opt", "@/root", "@/tmp", "@/usr/local"}
 	for _, sv := range subvols {
 		full := filepath.Join(tmpMount, sv)
-		if err := exec.Command("btrfs", "subvolume", "create", full).Run(); err != nil {
+		out, err := exec.Command("btrfs", "subvolume", "create", full).CombinedOutput()
+		if err != nil {
 			exec.Command("umount", tmpMount).Run()
-			return err
+			return fmt.Errorf("btrfs subvolume create %s: %s", sv, strings.TrimSpace(string(out)))
 		}
 	}
 	exec.Command("chattr", "+C", filepath.Join(tmpMount, "@/var")).Run()
 	exec.Command("umount", tmpMount).Run()
 
 	if err := spinner("Mounting root subvolume", func() error {
-		return exec.Command("mount", "-o", "subvol=@", root, "/mnt").Run()
+		out, err := exec.Command("mount", "-o", "subvol=@", root, "/mnt").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mount root: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -630,20 +704,32 @@ func partitionDisk(cfg Config) error {
 
 	os.MkdirAll("/mnt/boot/efi", 0755)
 	if err := spinner("Mounting EFI", func() error {
-		return exec.Command("mount", efi, "/mnt/boot/efi").Run()
+		out, err := exec.Command("mount", efi, "/mnt/boot/efi").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mount efi: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	if cfg.PartLayout == "split" && home != "" {
 		if err := spinner("Formatting home (ext4)", func() error {
-			return exec.Command("mkfs.ext4", "-F", home).Run()
+			out, err := exec.Command("mkfs.ext4", "-F", home).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("mkfs.ext4: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
 		os.MkdirAll("/mnt/home", 0755)
 		if err := spinner("Mounting home", func() error {
-			return exec.Command("mount", home, "/mnt/home").Run()
+			out, err := exec.Command("mount", home, "/mnt/home").CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("mount home: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
@@ -713,18 +799,26 @@ func partitionDiskDualboot(cfg Config) error {
 	exec.Command("udevadm", "settle", "--timeout=10").Run()
 	newRoots := findNewPartitions(disk, partsBefore)
 	if len(newRoots) != 1 {
-		return fmt.Errorf("could not identify new root partition")
+		return fmt.Errorf("could not identify new root partition, found: %v", newRoots)
 	}
 	rootDevice := newRoots[0]
 
 	if err := spinner("Formatting root (Btrfs)", func() error {
-		return exec.Command("mkfs.btrfs", "-f", rootDevice).Run()
+		out, err := exec.Command("mkfs.btrfs", "-f", rootDevice).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mkfs.btrfs: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 	if !hasEFI {
 		if err := spinner("Formatting EFI (FAT32)", func() error {
-			return exec.Command("mkfs.fat", "-F32", efiDevice).Run()
+			out, err := exec.Command("mkfs.fat", "-F32", efiDevice).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("mkfs.fat: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}); err != nil {
 			return err
 		}
@@ -733,21 +827,26 @@ func partitionDiskDualboot(cfg Config) error {
 	tmpMount := "/mnt/btrfs_tmp"
 	os.MkdirAll(tmpMount, 0755)
 	if err := exec.Command("mount", rootDevice, tmpMount).Run(); err != nil {
-		return err
+		return fmt.Errorf("mount btrfs tmp: %w", err)
 	}
 	subvols := []string{"@", "@/.snapshots", "@/home", "@/var", "@/opt", "@/root", "@/tmp", "@/usr/local"}
 	for _, sv := range subvols {
 		full := filepath.Join(tmpMount, sv)
-		if err := exec.Command("btrfs", "subvolume", "create", full).Run(); err != nil {
+		out, err := exec.Command("btrfs", "subvolume", "create", full).CombinedOutput()
+		if err != nil {
 			exec.Command("umount", tmpMount).Run()
-			return err
+			return fmt.Errorf("btrfs subvolume create %s: %s", sv, strings.TrimSpace(string(out)))
 		}
 	}
 	exec.Command("chattr", "+C", filepath.Join(tmpMount, "@/var")).Run()
 	exec.Command("umount", tmpMount).Run()
 
 	if err := spinner("Mounting root subvolume", func() error {
-		return exec.Command("mount", "-o", "subvol=@", rootDevice, "/mnt").Run()
+		out, err := exec.Command("mount", "-o", "subvol=@", rootDevice, "/mnt").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mount root: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -758,13 +857,17 @@ func partitionDiskDualboot(cfg Config) error {
 	}
 	for _, sv := range subvolsToMount {
 		targetDir := filepath.Join("/mnt", sv)
-		os.MkdirAll(targetDir, 0755)
-		exec.Command("mount", "-o", "subvol=@/"+sv, rootDevice, targetDir).Run()
+			os.MkdirAll(targetDir, 0755)
+			exec.Command("mount", "-o", "subvol=@/"+sv, rootDevice, targetDir).Run()
 	}
 
 	os.MkdirAll("/mnt/boot/efi", 0755)
 	if err := spinner("Mounting EFI", func() error {
-		return exec.Command("mount", efiDevice, "/mnt/boot/efi").Run()
+		out, err := exec.Command("mount", efiDevice, "/mnt/boot/efi").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mount efi: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -778,17 +881,29 @@ func installBase(cfg Config) error {
 	repoNonOSS := "http://download.opensuse.org/tumbleweed/repo/non-oss/"
 
 	if err := spinner("Adding OSS repository", func() error {
-		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoOSS, "repo-oss").Run()
+		out, err := exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoOSS, "repo-oss").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("zypper ar oss: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 	if err := spinner("Adding Non-OSS repository", func() error {
-		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoNonOSS, "repo-non-oss").Run()
+		out, err := exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "ar", "-f", repoNonOSS, "repo-non-oss").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("zypper ar non-oss: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 	if err := spinner("Refreshing repositories", func() error {
-		return exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "refresh").Run()
+		out, err := exec.Command("zypper", "--root", "/mnt", "--gpg-auto-import-keys", "refresh").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("zypper refresh: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -838,12 +953,10 @@ func installBase(cfg Config) error {
 func writeFstab(cfg Config) error {
 	var lines []string
 
-	out, err := exec.Command("lsblk", "-P", "-o", "NAME,MOUNTPOINT,FSTYPE,UUID").Output()
+	out, err := exec.Command("lsblk", "-nlo", "NAME,UUID,FSTYPE,MOUNTPOINT").Output()
 	if err != nil {
-		return err
+		return fmt.Errorf("lsblk failed: %w", err)
 	}
-
-	re := regexp.MustCompile(`([A-Z]+)="([^"]*)"`)
 
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
@@ -851,30 +964,29 @@ func writeFstab(cfg Config) error {
 			continue
 		}
 
-		matches := re.FindAllStringSubmatch(line, -1)
-		fields := make(map[string]string)
-		for _, m := range matches {
-			fields[m[1]] = m[2]
-		}
-
-		mount := fields["MOUNTPOINT"]
-		fstype := fields["FSTYPE"]
-		uuid := fields["UUID"]
-
-		if uuid == "" {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
 			continue
 		}
 
-		if mount != "/mnt" && !strings.HasPrefix(mount, "/mnt/") {
+		name := fields[0]
+		uuid := fields[1]
+		fstype := fields[2]
+		mount := fields[3]
+
+		if uuid == "" || fstype == "" {
 			continue
 		}
 
-		targetMount := strings.TrimPrefix(mount, "/mnt")
-		if targetMount == "" {
+		targetMount := ""
+		switch mount {
+		case "/mnt":
 			targetMount = "/"
-		}
-
-		if fstype == "btrfs" && targetMount != "/" {
+		case "/mnt/boot/efi":
+			targetMount = "/boot/efi"
+		case "/mnt/home":
+			targetMount = "/home"
+		default:
 			continue
 		}
 
@@ -883,11 +995,11 @@ func writeFstab(cfg Config) error {
 
 			subvols := map[string]string{
 				"/.snapshots": "@/.snapshots",
-				"/var":         "@/var",
-				"/opt":         "@/opt",
-				"/root":        "@/root",
-				"/tmp":         "@/tmp",
-				"/usr/local":   "@/usr/local",
+				"/var":        "@/var",
+				"/opt":        "@/opt",
+				"/root":       "@/root",
+				"/tmp":        "@/tmp",
+				"/usr/local":  "@/usr/local",
 			}
 
 			if cfg.PartLayout != "split" {
